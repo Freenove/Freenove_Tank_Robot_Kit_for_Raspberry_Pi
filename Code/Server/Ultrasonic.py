@@ -8,7 +8,7 @@ class Ultrasonic:
         GPIO.setwarnings(False)        
         self.trigger_pin = 27
         self.echo_pin = 22
-        self.MAX_DISTANCE = 220               # define the maximum measuring distance, unit: cm
+        self.MAX_DISTANCE = 300               # define the maximum measuring distance, unit: cm
         self.timeOut = self.MAX_DISTANCE*60   # calculate timeout according to the maximum measuring distance
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(self.trigger_pin,GPIO.OUT)
