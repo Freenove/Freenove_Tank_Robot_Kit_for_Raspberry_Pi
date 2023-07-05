@@ -44,13 +44,13 @@ class Servo:
     def setServoPwm(self,channel,angle):
         if channel=='0':
             angle=int(self.angle_range('0',angle))
-            self.PwmServo.set_PWM_dutycycle(self.channel1,80+(400/180)*angle)
+            self.PwmServo.set_PWM_dutycycle(self.channel1,100+(400/180)*angle)
         elif channel=='1':
             angle=int(self.angle_range('1',angle))
-            self.PwmServo.set_PWM_dutycycle(self.channel2,80+(400/180)*angle)
+            self.PwmServo.set_PWM_dutycycle(self.channel2,100+(400/180)*angle)
         elif channel=='2':
             angle=int(self.angle_range('2',angle))
-            self.PwmServo.set_PWM_dutycycle(self.channel3,80+(400/180)*angle)
+            self.PwmServo.set_PWM_dutycycle(self.channel3,100+(400/180)*angle)
 
 # Main program logic follows:
 if __name__ == '__main__':
