@@ -65,26 +65,39 @@ def test_Infrared():
         print ("\nEnd of program")
 
 from servo import *
+from Led import *
+import os
 servo=Servo()
+led=Led()
 def test_Servo():
-    try:
-        while True:
-            for i in range(90,150,1):
-                servo.setServoPwm('0',i)
-                time.sleep(0.01)
-            for i in range(140,90,-1):
-                servo.setServoPwm('1',i)
-                time.sleep(0.01)
-            for i in range(90,140,1):
-                servo.setServoPwm('1',i)
-                time.sleep(0.01)
-            for i in range(150,90,-1):
-                servo.setServoPwm('0',i)
-                time.sleep(0.01)   
-    except KeyboardInterrupt:
-        servo.setServoPwm('0',90)
-        servo.setServoPwm('1',140)
-        print ("\nEnd of program")
+    with open("calibration.txt", "r") as file:  # open file
+        data = file.read()  # Read the file
+        #print(data)
+    file.close()
+    if(data=='ok'):
+        try:
+            while True:
+                for i in range(90,150,1):
+                    servo.setServoPwm('0',i)
+                    time.sleep(0.01)
+                for i in range(140,90,-1):
+                    servo.setServoPwm('1',i)
+                    time.sleep(0.01)
+                for i in range(90,140,1):
+                    servo.setServoPwm('1',i)
+                    time.sleep(0.01)
+                for i in range(150,90,-1):
+                    servo.setServoPwm('0',i)
+                    time.sleep(0.01)   
+        except KeyboardInterrupt:
+            servo.setServoPwm('0',90)
+            servo.setServoPwm('1',140)
+            print ("\nEnd of program")
+    else:
+        led.colorWipe(led.strip, Color(255,0, 0)) # Red light 
+        time.sleep(0.5)
+        led.colorWipe(led.strip, Color(0,0, 0))   # Turn off the light
+        print ("\nThe steering gear has not been calibrated, please try again after calibration.")
 
 # Main program logic follows:
 if __name__ == '__main__':
