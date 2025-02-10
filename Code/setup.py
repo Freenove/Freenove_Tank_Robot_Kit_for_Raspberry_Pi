@@ -26,7 +26,7 @@ def apt_install(package):
 
 def custom_install(command):
     try:
-        subprocess.run(command, shell=True, check=True)
+        subprocess.run(["bash", command], shell=True, check=True)
         return True
     except subprocess.CalledProcessError:
         print(f"Failed to execute custom command: {command}")
