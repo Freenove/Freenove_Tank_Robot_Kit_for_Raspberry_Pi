@@ -5,31 +5,35 @@ import subprocess
 def check_and_install(package):
     try:
         __import__(package)
+        print(f"{package} is already installed.")
         return True
     except ImportError:
-        install_command = f"sudo pip3 install {package}"
+        install_command = f"pip3 install --user {package}"
         try:
             subprocess.run(install_command, shell=True, check=True)
+            print(f"Successfully installed {package}.")
             return True
-        except subprocess.CalledProcessError:
-            print(f"Failed to install {package}.")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to install {package}: {e}")
             return False
 
 def apt_install(package):
     install_command = f"sudo apt-get install -y {package}"
     try:
         subprocess.run(install_command, shell=True, check=True)
+        print(f"Successfully installed {package} via apt-get.")
         return True
-    except subprocess.CalledProcessError:
-        print(f"Failed to install {package} via apt-get.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install {package} via apt-get: {e}")
         return False
 
 def custom_install(command):
     try:
-        subprocess.run(["bash", command], shell=True, check=True)
+        subprocess.run(command, shell=True, check=True)
+        print(f"Successfully executed custom command: {command}")
         return True
-    except subprocess.CalledProcessError:
-        print(f"Failed to execute custom command: {command}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to execute custom command: {command}: {e}")
         return False
 
 def get_raspberry_pi_version():
@@ -142,7 +146,6 @@ def config_file():
 def main():
     install_status = {
         "python3-dev python3-pyqt5": False,
-        #"python3-picamera2": False,
         "pigpio": False,
         "gpiozero": False,
         "numpy": False,
@@ -151,15 +154,22 @@ def main():
         "rpi-ws281x-python (custom install)": False
     }
 
+    print("Updating package lists...")
     subprocess.run("sudo apt-get update", shell=True, check=True)
+    
+    print("Installing APT packages...")
     install_status["python3-dev python3-pyqt5"] = apt_install("python3-dev python3-pyqt5")
-    #install_status["python3-picamera2"] = apt_install("python3-picamera2")
+
+    print("Checking and installing Python packages...")
     install_status["pigpio"] = check_and_install("pigpio")
     install_status["gpiozero"] = check_and_install("gpiozero")
     install_status["numpy"] = check_and_install("numpy")
     install_status["rpi-hardware-pwm --break-system-packages"] = check_and_install("rpi-hardware-pwm --break-system-packages")
+    
+    print("Running custom installations...")
     install_status["pi-hardware-pwm (custom install)"] = custom_install("cd ./Libs/pi-hardware-pwm && ./cleanup_pwm_overlay.sh && ./setup_pwm_overlay.sh")
     install_status["rpi-ws281x-python (custom install)"] = custom_install("cd ./Libs/rpi-ws281x-python/library && sudo python3 setup.py install")
+
     if all(install_status.values()):
         print("\nAll libraries have been installed successfully.")
         config_file()
@@ -169,4 +179,4 @@ def main():
         print(f"\nSome libraries have not been installed yet: {', '.join(missing_libraries)}. Please run the script again.")
 
 if __name__ == "__main__":
-    main()  
+    main()
