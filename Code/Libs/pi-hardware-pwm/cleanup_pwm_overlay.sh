@@ -1,8 +1,8 @@
 #!/bin/bash
 
-model=$(cat /proc/cpuinfo | grep 'model name' | uniq | awk -F: '{print $2}' | xargs)
+model=$(cat /proc/cpuinfo | grep 'Model' | uniq | awk -F: '{print $2}' | xargs)
 
-if [[ "$model" == *"Raspberry Pi 5"* ]]; then
+if echo "$model" | grep -q "Raspberry Pi 5"; then
     local_file="./pwm-pi5.dtbo"
     overlays_file="/boot/firmware/overlays/pwm-pi5.dtbo"
     config_file="/boot/firmware/config.txt"
