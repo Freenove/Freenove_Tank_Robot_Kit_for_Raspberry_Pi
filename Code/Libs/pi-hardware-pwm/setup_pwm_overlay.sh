@@ -2,7 +2,7 @@
 
 model=$(cat /proc/cpuinfo | grep 'Model' | uniq | awk -F: '{print $2}' | xargs)
 
-if [[ "$model" == *"Raspberry Pi 5"* ]]; then
+if echo "$model" | grep -q "Raspberry Pi 5"; then
   # Step 1: Compile the DTS file to DTB
   dtc -I dts -O dtb -o pwm-pi5.dtbo pwm-pi5-overlay.dts
 
@@ -52,5 +52,5 @@ else
     echo "'$overlay_line' already exists in /boot/firmware/config.txt. Skipping append."
   fi
 fi
- 
+
 echo "Script execution completed."
