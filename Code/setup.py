@@ -167,7 +167,7 @@ def main():
     install_status["rpi-hardware-pwm --break-system-packages"] = check_and_install("rpi-hardware-pwm --break-system-packages")
     
     print("Running custom installations...")
-    install_status["pi-hardware-pwm (custom install)"] = custom_install("cd ./Libs/pi-hardware-pwm && ./cleanup_pwm_overlay.sh && ./setup_pwm_overlay.sh")
+    install_status["pi-hardware-pwm (custom install)"] = custom_install("cd ./Libs/pi-hardware-pwm &&sh ./cleanup_pwm_overlay.sh &&sh ./setup_pwm_overlay.sh")
     install_status["rpi-ws281x-python (custom install)"] = custom_install("cd ./Libs/rpi-ws281x-python/library && sudo python3 setup.py install")
 
     if all(install_status.values()):
