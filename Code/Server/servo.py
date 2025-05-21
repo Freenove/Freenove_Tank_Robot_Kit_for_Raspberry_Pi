@@ -59,8 +59,8 @@ class HardwareServo:
             self.pwm_gpio12 = HardwarePWM(pwm_channel=0, hz=50, chip=0)  # Initialize PWM for GPIO 12 on chip 0
             self.pwm_gpio13 = HardwarePWM(pwm_channel=1, hz=50, chip=0)  # Initialize PWM for GPIO 13 on chip 0
         elif self.pcb_version == 2:
-            self.pwm_gpio12 = HardwarePWM(pwm_channel=0, hz=50, chip=2)  # Initialize PWM for GPIO 12 on chip 2
-            self.pwm_gpio13 = HardwarePWM(pwm_channel=1, hz=50, chip=2)  # Initialize PWM for GPIO 13 on chip 2
+            self.pwm_gpio12 = HardwarePWM(pwm_channel=0, hz=50, chip=0)  # Initialize PWM for GPIO 12 on chip 2
+            self.pwm_gpio13 = HardwarePWM(pwm_channel=1, hz=50, chip=0)  # Initialize PWM for GPIO 13 on chip 2
         self.pwm_gpio12.start(0)  # Start PWM for GPIO 12 with 0% duty cycle
         self.pwm_gpio13.start(0)  # Start PWM for GPIO 13 with 0% duty cycle
 
