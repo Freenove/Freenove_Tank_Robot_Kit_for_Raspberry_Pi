@@ -17,7 +17,7 @@ class StreamingOutput(io.BufferedIOBase):
             self.condition.notify_all()  # Notify all waiting threads that new data is available
 
 class Camera:
-    def __init__(self, preview_size=(640, 480), hflip=True, vflip=True, stream_size=(400, 300)):
+    def __init__(self, preview_size=(640, 480), hflip=False, vflip=False, stream_size=(400, 300)):
         self.camera = Picamera2()              # Initialize the Picamera2 object
         self.transform = Transform(hflip=1 if hflip else 0, vflip=1 if vflip else 0)  # Set the transformation for flipping the image
         preview_config = self.camera.create_preview_configuration(main={"size": preview_size}, transform=self.transform)  # Create the preview configuration
