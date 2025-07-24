@@ -371,7 +371,7 @@ If the terminal displays the directory as below, you can directly run the Led.py
 
 ..  code-block:: console
     
-    sudo python text.py camera
+    sudo python test.py camera
 
 .. image:: ../_static/imgs/3_Module_test_(necessary)/Chapter03_21.png
     :align: center
