@@ -5,8 +5,8 @@ from gpiozero import Motor
 class tankMotor:
     def __init__(self):
         """Initialize the tankMotor class with GPIO pins for the left and right motors."""
-        self.left_motor = Motor(23, 24)  # Initialize the left motor with GPIO pins 23 and 24
-        self.right_motor = Motor(6, 5)   # Initialize the right motor with GPIO pins 6 and 5
+        self.left_motor = Motor(24, 23)  # Initialize the left motor with GPIO pins 23 and 24
+        self.right_motor = Motor(5, 6)   # Initialize the right motor with GPIO pins 6 and 5
 
     def duty_range(self, duty1, duty2):
         """Ensure the duty cycle values are within the valid range (-4095 to 4095)."""
