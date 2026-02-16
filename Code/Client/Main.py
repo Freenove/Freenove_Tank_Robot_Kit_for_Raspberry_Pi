@@ -6,7 +6,7 @@ import socket
 import os
 import io
 import time
-import imghdr
+# import imghdr  # Removed: unused and deprecated in Python 3.13
 import sys
 from threading import Timer
 from threading import Thread
@@ -25,7 +25,21 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 
+# AI Mode imports
+import sys
+try:
+    from ai_mode import AIModeSession, set_tcp_client, set_video_frame, parse_robot_message
+    AI_MODE_AVAILABLE = True
+    print(f"AI Mode loaded successfully!", flush=True)
+except ImportError as e:
+    AI_MODE_AVAILABLE = False
+    print(f"AI Mode not available: {e}", flush=True)
+    print("Install: pip install google-adk google-genai python-dotenv pyaudio", flush=True)
+
 class mywindow(QMainWindow,Ui_Client):
+    sig_sonic = pyqtSignal(str)
+    sig_pinch = pyqtSignal(bool)
+
     def __init__(self):
         global timer
         super(mywindow,self).__init__()
@@ -71,6 +85,8 @@ class mywindow(QMainWindow,Ui_Client):
         self.color_blue =  [100, 94, 142, 120, 255, 255]
 
         self.setFocusPolicy(Qt.StrongFocus)
+        self.sig_sonic.connect(lambda val: self.Ultrasonic.setText('Obstruction:%s cm'%val))
+        self.sig_pinch.connect(self.checkBox_Pinch_Object.setChecked)
         self.name.setAlignment(QtCore.Qt.AlignCenter)
         self.label_Servo1.setText('90')
         self.label_Servo2.setText('140')
@@ -96,6 +112,55 @@ class mywindow(QMainWindow,Ui_Client):
         self.Btn_Mode2.toggled.connect(lambda:self.on_btn_Mode(self.Btn_Mode2))
         self.Btn_Mode3.setChecked(False)
         self.Btn_Mode3.toggled.connect(lambda:self.on_btn_Mode(self.Btn_Mode3))
+
+        # AI Mode button (4th mode alongside M-Free, M-Sonic, M-Line)
+        self.Btn_Mode4 = QRadioButton("M-AI")
+        self.Btn_Mode4.setChecked(False)
+        self.Btn_Mode4.toggled.connect(lambda: self.on_btn_Mode(self.Btn_Mode4))
+        self.Btn_Mode4.setStyleSheet("color: rgb(220, 220, 220); font: 10pt \"Malgun Gothic\";")
+        # Add to existing mode button layout (horizontalLayout_3 contains Btn_Mode1/2/3)
+        self.horizontalLayout_3.addWidget(self.Btn_Mode4)
+
+        # AI Chat Panel (hidden until M-AI mode selected)
+        self.ai_panel = QFrame(self)
+        self.ai_panel.setFrameStyle(QFrame.StyledPanel)
+        self.ai_panel.setGeometry(405, 370, 395, 210)
+        self.ai_panel.setStyleSheet("background-color: rgb(50, 50, 50); border-radius: 5px;")
+        self.ai_panel.setVisible(False)
+
+        # Chat transcript display
+        self.ai_transcript = QTextEdit(self.ai_panel)
+        self.ai_transcript.setReadOnly(True)
+        self.ai_transcript.setPlaceholderText("Select M-AI mode and hold the button to talk...")
+        self.ai_transcript.setStyleSheet("background-color: rgb(30, 30, 30); color: rgb(220, 220, 220); border: none;")
+
+        # Status indicator
+        self.ai_status = QLabel("Ready", self.ai_panel)
+        self.ai_status.setAlignment(Qt.AlignCenter)
+        self.ai_status.setStyleSheet("color: rgb(100, 200, 100); font-weight: bold;")
+
+        # Push-to-talk button for voice control
+        self.btn_talk = QPushButton("Hold to Talk", self.ai_panel)
+        self.btn_talk.setMinimumHeight(40)
+        self.btn_talk.pressed.connect(self.on_talk_pressed)
+        self.btn_talk.released.connect(self.on_talk_released)
+        self.btn_talk.setEnabled(False)
+        self.btn_talk.setStyleSheet("background-color: rgb(70, 70, 70); color: rgb(220, 220, 220); border-radius: 5px;")
+
+        # Layout for AI panel
+        ai_layout = QVBoxLayout(self.ai_panel)
+        ai_layout.setContentsMargins(10, 10, 10, 10)
+        ai_title = QLabel("<b>AI Assistant</b>")
+        ai_title.setStyleSheet("color: rgb(220, 220, 220);")
+        ai_layout.addWidget(ai_title)
+        ai_layout.addWidget(self.ai_transcript, stretch=1)
+        ai_layout.addWidget(self.ai_status)
+        ai_layout.addWidget(self.btn_talk)
+
+        # AI Mode session
+        self.ai_session = None
+        if AI_MODE_AVAILABLE:
+            self.ai_session = AIModeSession()
 
         self.Ultrasonic.clicked.connect(self.on_btn_Ultrasonic)
 
@@ -393,6 +458,9 @@ class mywindow(QMainWindow,Ui_Client):
                 self.Key_D=True
 
     def closeEvent(self, event):
+        # Stop AI mode first if available
+        if AI_MODE_AVAILABLE:
+            self.stop_ai_mode()
         self.timer.stop()
         try:
             stop_thread(self.recv)
@@ -643,18 +711,126 @@ class mywindow(QMainWindow,Ui_Client):
             pass
 
     def on_btn_Mode(self,Mode):
+        # Hide AI panel for non-AI modes
+        if Mode.text() != "M-AI":
+            self.ai_panel.setVisible(False)
+            self.stop_ai_mode()
+
         if Mode.text() == "M-Free":
             if Mode.isChecked() == True:
-                #self.timer.start(34)
                 self.TCP.sendData(cmd.CMD_MODE+self.intervalChar+'0'+self.endChar)
         elif Mode.text() == "M-Sonic":
             if Mode.isChecked() == True:
-                #self.timer.stop()
                 self.TCP.sendData(cmd.CMD_MODE+self.intervalChar+'1'+self.endChar)
         elif Mode.text() == "M-Line":
             if Mode.isChecked() == True:
-                #self.timer.stop()
                 self.TCP.sendData(cmd.CMD_MODE+self.intervalChar+'2'+self.endChar)
+        elif Mode.text() == "M-AI":
+            if Mode.isChecked() == True:
+                print(f"M-AI clicked! AI_MODE_AVAILABLE={AI_MODE_AVAILABLE}", flush=True)
+                self.ai_panel.setVisible(True)
+                if not self.start_ai_mode():
+                    print("start_ai_mode() returned False - falling back to M-Free", flush=True)
+                    self.Btn_Mode1.setChecked(True)  # Fall back to M-Free
+                    self.ai_panel.setVisible(False)
+                else:
+                    print("AI Mode started successfully!", flush=True)
+
+    # === PUSH-TO-TALK VOICE CONTROL ===
+
+    def on_talk_pressed(self):
+        """User pressed talk button - start recording."""
+        if self.ai_session and self.ai_session.state == "ready":
+            self.ai_session.start_listening()
+
+    def on_talk_released(self):
+        """User released talk button - process command."""
+        if self.ai_session and self.ai_session.state == "listening":
+            self.ai_session.stop_listening()
+
+    # Qt slots receive signals from background thread (thread-safe)
+    def on_ai_state_change(self, state):
+        """Update UI based on AI state. Connected via Qt signal (thread-safe)."""
+        states = {
+            "ready": ("Hold to Talk", "Ready", True),
+            "listening": ("Recording...", "Listening...", False),
+            "thinking": ("Processing...", "Thinking...", False),
+            "speaking": ("Speaking...", "Speaking...", False),
+        }
+        btn_text, status_text, enabled = states.get(state, ("Hold to Talk", "Ready", True))
+        self.btn_talk.setText(btn_text)
+        self.ai_status.setText(status_text)
+        self.btn_talk.setEnabled(enabled)
+
+    def on_ai_error(self, error_msg):
+        """Handle AI session errors. Connected via Qt signal (thread-safe)."""
+        self.ai_transcript.append(f"<p style='color:#c62828'><b>Error:</b> {error_msg}</p>")
+        self.btn_talk.setText("Hold to Talk")
+        self.btn_talk.setEnabled(True)
+        self.ai_status.setText("Error")
+
+    def on_ai_transcript(self, role, text):
+        """Add message to chat. Connected via Qt signal (thread-safe).
+
+        Roles:
+        - user: User's speech transcription
+        - robot: Final robot response
+        - env: Sensor readings (distance, clamp, connection)
+        - prompt: Full prompt sent to agent
+        - tool: Tool calls (function invocations)
+        - tool_result: Tool execution results
+        - camera: Camera frame indicator
+        """
+        styles = {
+            "user": ("#1565c0", "You", ""),
+            "robot": ("#2e7d32", "Robot", ""),
+            "env": ("#757575", "Sensors", "font-size: 11px;"),
+            "prompt": ("#9e9e9e", "Prompt", "font-size: 10px; font-family: monospace;"),
+            "tool": ("#ff6f00", "Tool", "font-size: 11px; font-family: monospace;"),
+            "tool_result": ("#6a1b9a", "Result", "font-size: 11px;"),
+            "camera": ("#00838f", "Camera", "font-size: 11px;"),
+        }
+        color, label, extra_style = styles.get(role, ("#424242", role.title(), ""))
+        style = f"color:{color}; {extra_style}".strip()
+        self.ai_transcript.append(f"<p style='{style}'><b>{label}:</b> {text}</p>")
+        self.ai_transcript.verticalScrollBar().setValue(self.ai_transcript.verticalScrollBar().maximum())
+
+    # === AI MODE CONTROL ===
+
+    def start_ai_mode(self):
+        """Start AI Mode - ADK agent with Gemini STT/TTS."""
+        print(f"start_ai_mode: AI_MODE_AVAILABLE={AI_MODE_AVAILABLE}, ai_session={self.ai_session}", flush=True)
+        if not AI_MODE_AVAILABLE:
+            print("AI Mode not available - imports failed", flush=True)
+            return False
+        init_result = self.ai_session.initialize()
+        print(f"ai_session.initialize() returned: {init_result}", flush=True)
+        if not init_result:
+            print("Failed to initialize AI Mode. Check .env for GOOGLE_API_KEY", flush=True)
+            return False
+
+        # Connect Qt signals (thread-safe UI updates)
+        self.ai_session.state_changed.connect(self.on_ai_state_change)
+        self.ai_session.transcript_received.connect(self.on_ai_transcript)
+        self.ai_session.error_occurred.connect(self.on_ai_error)
+
+        set_tcp_client(self.TCP)
+        self.btn_talk.setEnabled(True)
+        self.ai_transcript.append("<i>AI Mode ready. Hold button to speak!</i>")
+        return True
+
+    def stop_ai_mode(self):
+        """Stop AI Mode."""
+        if self.ai_session:
+            try:
+                self.ai_session.state_changed.disconnect(self.on_ai_state_change)
+                self.ai_session.transcript_received.disconnect(self.on_ai_transcript)
+                self.ai_session.error_occurred.disconnect(self.on_ai_error)
+            except:
+                pass
+            self.ai_session.stop()
+            self.btn_talk.setEnabled(False)
+            self.btn_talk.setText("Hold to Talk")
 
     def on_btn_video(self):
         if self.Btn_Video.text()=='Open Video':
@@ -691,7 +867,13 @@ class mywindow(QMainWindow,Ui_Client):
                 print ('recv error')
             print ('Server address:'+str(self.h)+'\n')
             self.Btn_Connect.setText("Disconnect")
+            # Set TCP for AI Mode
+            if AI_MODE_AVAILABLE:
+                set_tcp_client(self.TCP)
         elif self.Btn_Connect.text()=="Disconnect":
+            # Clear TCP for AI Mode
+            if AI_MODE_AVAILABLE:
+                set_tcp_client(None)
             self.Btn_Connect.setText( "Connect")
             self.TCP.connect_Flag = False
             try:
@@ -730,12 +912,17 @@ class mywindow(QMainWindow,Ui_Client):
                         restCmd=cmdArray[-1]
                         cmdArray=cmdArray[:-1]
                 for oneCmd in cmdArray:
+                    # CRITICAL: Feed ALL messages to AI sensor cache
+                    if AI_MODE_AVAILABLE:
+                        parse_robot_message(oneCmd)
+                    # END CRITICAL
+
                     Massage=oneCmd.split("#")
                     if cmd.CMD_SONIC in Massage:
-                        self.Ultrasonic.setText('Obstruction:%s cm'%Massage[1])
+                        self.sig_sonic.emit(Massage[1])
                     elif cmd.CMD_ACTION in Massage:
                         if Massage[1]=='10':
-                            self.checkBox_Pinch_Object.setChecked(False)
+                            self.sig_pinch.emit(False)
                         elif Massage[1] == '20':
                             self.checkBox_Drop_Object.setChecked(False)
 
@@ -797,6 +984,10 @@ class mywindow(QMainWindow,Ui_Client):
         try:
             if self.TCP.video_Flag == False:
                 video = self.TCP.image
+                # CRITICAL: Feed video to AI for vision
+                if AI_MODE_AVAILABLE:
+                    set_video_frame(video)
+                # END CRITICAL
                 height, width, bytesPerComponent = video.shape
                 if self.color_select_button != 0:
                     self.block_detect(video)

@@ -384,7 +384,7 @@ class Ui_Client(object):
         self.checkBox_Drop_Object.setObjectName("checkBox_Drop_Object")
         self.horizontalLayout_4.addWidget(self.checkBox_Drop_Object)
         self.horizontalLayoutWidget_3 = QtWidgets.QWidget(self.public)
-        self.horizontalLayoutWidget_3.setGeometry(QtCore.QRect(30, 235, 321, 61))
+        self.horizontalLayoutWidget_3.setGeometry(QtCore.QRect(30, 235, 400, 61))  # Widened for M-AI button
         self.horizontalLayoutWidget_3.setObjectName("horizontalLayoutWidget_3")
         self.horizontalLayout_3 = QtWidgets.QHBoxLayout(self.horizontalLayoutWidget_3)
         self.horizontalLayout_3.setContentsMargins(0, 0, 0, 0)

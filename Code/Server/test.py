@@ -130,10 +130,30 @@ def test_Camera():
     camera = Camera()                 # Initialize the Camera instance
     camera.start_image()              # Start the camera
     print("Take a photo and save it as 'image.jpg' after 5 seconds.")
-    time.sleep(5)   
+    time.sleep(5)
     camera.save_image("image.jpg")  # Capture an image and save it as test.jpg
     camera.close()                    # Close the camera
     print("Camera test finished")     # Print a finish message
+
+def test_Lidar():
+    from tfminis import TFMiniS                                       # Import the TFMiniS class from the tfminis module
+    import time                                                       # Import the time module for sleep functionality
+    print('Program is starting ... ')                                 # Print a start message
+    lidar = TFMiniS()                                                 # Initialize the TFMiniS instance
+    if not lidar.connect():                                           # Try to connect to the sensor
+        print("Failed to connect to TF-Mini S LiDAR")                 # Print error if connection fails
+        return
+    try:
+        while True:
+            distance = lidar.read_distance()                          # Get the distance to the obstacle
+            if distance >= 0:
+                print("Obstacle distance is " + str(distance) + "CM") # Print the distance
+            else:
+                print("No valid reading")                             # Print error for invalid reading
+            time.sleep(0.1)                                           # Wait for 0.1 seconds
+    except KeyboardInterrupt:                                         # Handle keyboard interrupt (Ctrl+C)
+        lidar.close()                                                 # Close the sensor connection
+        print("\nEnd of program")                                     # Print an end message
 
 # Main program logic follows:
 if __name__ == '__main__':
@@ -155,3 +175,5 @@ if __name__ == '__main__':
         test_Servo()                                             # Run the servo test
     elif sys.argv[1] == 'Camera' or sys.argv[1] == 'camera':
         test_Camera()                                            # Run the camera test
+    elif sys.argv[1] == 'Lidar' or sys.argv[1] == 'lidar':
+        test_Lidar()                                             # Run the LiDAR test

@@ -14,6 +14,8 @@ from command import Command                             # Import the Command cla
 from led import Led                                    # Import the Led class from the led module
 from camera import Camera                              # Import the Camera class from the camera module
 from car import Car                                    # Import the Car class from the car module
+from gamepad import Gamepad                            # Import the Gamepad class for controller support
+from tfminis import TFMiniS                            # Import the TFMiniS class for LiDAR support
 
 class mywindow(QMainWindow, Ui_server_ui):
     def __init__(self):
@@ -48,15 +50,44 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.car_thread = None                         # Initialize the car thread
         self.led_process = None                        # Initialize the LED process
         self.action_process = None                     # Initialize the action process
+        self.gamepad_thread = None                     # Initialize the gamepad thread
         self.cmd_thread_is_running = False             # Initialize the command thread running state
         self.video_thread_is_running = False           # Initialize the video thread running state
         self.car_thread_is_running = False             # Initialize the car thread running state
         self.led_process_is_running = False            # Initialize the LED process running state
         self.action_process_is_running = False         # Initialize the action process running state
+        self.gamepad_thread_is_running = False         # Initialize the gamepad thread running state
+        self.gamepad = Gamepad(deadzone=0.15)          # Initialize gamepad with 15% deadzone
         self.car_mode = 1                              # Initialize the car mode
         self.car_last_mode = 1                         # Initialize the last car mode
         self.left_wheel_speed = 0                      # Initialize the left wheel speed
         self.right_wheel_speed = 0                     # Initialize the right wheel speed
+
+        # Gamepad control state
+        self.gamepad_servo0_angle = 90                 # Clamp open/close (90=closed, 150=open)
+        self.gamepad_servo1_angle = 140                # Arm up/down (90=down, 140=up)
+        self.gamepad_led_mode = 0                      # LED mode (0-5)
+        self.gamepad_last_rt_pressed = False           # Track RT trigger for Pinch action
+        self.gamepad_last_lt_pressed = False           # Track LT trigger for Drop action
+        self.gamepad_last_y_pressed = False            # Track Y button for LED cycle
+        self.gamepad_last_a_pressed = False            # Track A button for emergency stop
+        self.gamepad_last_b_pressed = False            # Track B button for mode cycle
+        self.gamepad_last_x_pressed = False            # Track X button for home position
+        self.gamepad_last_rb_pressed = False           # Track RB for arm up
+        self.gamepad_last_lb_pressed = False           # Track LB for arm down
+        self.gamepad_pinch_active = False              # Pinch action toggle state
+        self.gamepad_drop_active = False               # Drop action toggle state
+        self.gamepad_last_home_pressed = False         # Track Home button
+        self.gamepad_speed_level = 2                   # Speed level 0-4 (0=25%, 1=50%, 2=75%, 3=100%, 4=turbo)
+        self.gamepad_last_dpad_y = 0                   # Track D-pad for edge detection
+
+        # LiDAR state (private, underscore prefix)
+        self._lidar = None                             # TFMiniS sensor instance
+        self._lidar_distance = 0                       # Last valid distance reading (cm)
+        self._lidar_lock = threading.Lock()            # Lock for thread-safe distance access
+        self._lidar_available = False                  # True if sensor connected and working
+        self._lidar_thread = None                      # LiDAR reading thread
+        self._lidar_thread_is_running = False          # LiDAR thread running state
 
     def stop_car(self):
         self.led.colorWipe([0, 0, 0])                  # Turn off the LEDs
@@ -73,6 +104,8 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.set_threading_video_send(True)        # Start the video send thread
             self.set_threading_car_task(True)          # Start the car task thread
             self.set_process_led_running(True)         # Start the LED process
+            self.set_threading_gamepad(True)           # Start the gamepad thread
+            self.set_threading_lidar(True)             # Start the LiDAR thread
         elif self.label.text() == 'Server On':
             self.label.setText("Server Off")           # Change the label text to "Server Off"
             self.Button_Server.setText("On")           # Change the button text to "On"
@@ -81,6 +114,8 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.set_threading_video_send(False)       # Stop the video send thread
             self.set_threading_car_task(False)         # Stop the car task thread
             self.set_process_led_running(False)        # Stop the LED process
+            self.set_threading_gamepad(False)          # Stop the gamepad thread
+            self.set_threading_lidar(False)            # Stop the LiDAR thread
             self.tcp_server = TankServer()             # Reinitialize the TCP server
 
     def set_threading_cmd_receive(self, state, close_time=0.3):
@@ -130,7 +165,10 @@ class mywindow(QMainWindow, Ui_server_ui):
                     elif self.cmd_parser.commandString == self.command.CMD_MOTOR:
                         self.left_wheel_speed = int(self.cmd_parser.intParameter[0])                 # Get the left wheel speed
                         self.right_wheel_speed = int(self.cmd_parser.intParameter[1])                # Get the right wheel speed
-                        self.car.motor.setMotorModel(self.left_wheel_speed, self.right_wheel_speed)  # Set the motor model
+                        # Apply LiDAR limit (forward = both speeds positive)
+                        is_forward = self.left_wheel_speed > 0 and self.right_wheel_speed > 0
+                        limited_left, limited_right = self._apply_lidar_limit(self.left_wheel_speed, self.right_wheel_speed, is_forward)
+                        self.car.motor.setMotorModel(limited_left, limited_right)                    # Set the motor model
                     elif self.cmd_parser.commandString == self.command.CMD_MODE:
                         if self.car.infrared_run_stop == False:   
                             self.car.infrared_run_stop = True       # Set the infrared run stop state
@@ -222,6 +260,325 @@ class mywindow(QMainWindow, Ui_server_ui):
                         print("clamp down stop")                                  # Print a message
                         break
 
+    def set_threading_gamepad(self, state, close_time=0.3):
+        """Start or stop the gamepad reading thread."""
+        if self.gamepad_thread is None:
+            buf_state = False
+        else:
+            buf_state = self.gamepad_thread.is_alive()
+        if state != buf_state:
+            if state:
+                self.gamepad_thread_is_running = True
+                self.gamepad.start()  # Start the gamepad reader
+                self.gamepad_thread = threading.Thread(target=self.threading_gamepad)
+                self.gamepad_thread.start()
+                print("Gamepad control thread started")
+            else:
+                self.gamepad_thread_is_running = False
+                self.gamepad.stop()  # Stop the gamepad reader
+                if self.gamepad_thread is not None:
+                    self.gamepad_thread.join(close_time)
+                    self.gamepad_thread = None
+                print("Gamepad control thread stopped")
+
+    def set_threading_lidar(self, state, close_time=0.3):
+        """Start or stop the LiDAR reading thread."""
+        if self._lidar_thread is None:
+            buf_state = False
+        else:
+            buf_state = self._lidar_thread.is_alive()
+        if state != buf_state:
+            if state:
+                self._lidar_thread_is_running = True
+                self._lidar_thread = threading.Thread(target=self.threading_lidar, daemon=True)
+                self._lidar_thread.start()
+                print("LiDAR thread started")
+            else:
+                self._lidar_thread_is_running = False
+                if self._lidar_thread is not None:
+                    self._lidar_thread.join(close_time)
+                    self._lidar_thread = None
+                print("LiDAR thread stopped")
+
+    def _apply_lidar_limit(self, left_speed, right_speed, is_forward):
+        """Apply LiDAR-based speed limiting for obstacle avoidance.
+
+        Args:
+            left_speed: Left motor speed (-4095 to 4095)
+            right_speed: Right motor speed (-4095 to 4095)
+            is_forward: True if robot is moving forward
+
+        Returns:
+            Tuple of (left_speed, right_speed) after applying limits
+        """
+        if not is_forward or not self._lidar_available:
+            return left_speed, right_speed
+
+        with self._lidar_lock:
+            dist = self._lidar_distance
+
+        if dist <= 0:          # Fail-safe or error
+            return 0, 0
+        elif dist < 10:        # STOP zone
+            return 0, 0
+        elif dist < 40:        # SLOW zone (linear scaling)
+            scale = dist / 40.0
+            return int(left_speed * scale), int(right_speed * scale)
+        else:                  # dist >= 40, full speed
+            return left_speed, right_speed
+
+    def threading_lidar(self):
+        """Read LiDAR at 20Hz, update shared distance variable."""
+        # Initialize sensor
+        self._lidar = TFMiniS()
+        if not self._lidar.connect():
+            print("LiDAR: Not available (continuing without)")
+            return
+
+        self._lidar_available = True
+        fail_count = 0
+
+        while self._lidar_thread_is_running:
+            lidar_ref = self._lidar  # Local reference for thread safety
+            if lidar_ref:
+                distance = lidar_ref.read_distance()
+
+                if distance >= 0:
+                    with self._lidar_lock:
+                        self._lidar_distance = distance
+                    fail_count = 0
+                else:
+                    fail_count += 1
+                    if fail_count >= 10:  # 500ms at 20Hz
+                        with self._lidar_lock:
+                            self._lidar_distance = 0  # Fail-safe stop
+                        print("LiDAR: Fail-safe triggered")
+                        fail_count = 0  # Reset to avoid spam
+
+            time.sleep(0.05)  # 20Hz
+
+        # Cleanup
+        if self._lidar:
+            self._lidar.close()
+            self._lidar = None
+        self._lidar_available = False
+
+    def threading_gamepad(self):
+        """Main loop that reads gamepad and controls the robot."""
+        MOTOR_BASE = 3000  # Base motor speed (not full 4095 for safety)
+        SPEED_MULTIPLIERS = [0.25, 0.50, 0.75, 1.0, 1.25]  # Speed levels 0-4
+        SERVO_SPEED = 2   # Degrees per update for arm movement
+        LOOP_INTERVAL = 0.02  # 50Hz target
+        was_connected = False  # Track connection state for disconnect detection
+
+        while self.gamepad_thread_is_running:
+            loop_start = time.monotonic()
+            state = self.gamepad.get_state()
+
+            if not state.connected:
+                # Stop motors immediately when controller disconnects
+                if was_connected:
+                    print("Gamepad: Disconnected - stopping motors")
+                    self.left_wheel_speed = 0
+                    self.right_wheel_speed = 0
+                    self.car.motor.setMotorModel(0, 0)
+                    was_connected = False
+                time.sleep(0.1)  # Wait longer if no controller
+                continue
+
+            # Controller just connected - reset all state
+            if not was_connected:
+                print("Gamepad: Connected - resetting state")
+                was_connected = True
+                # Reset motor state
+                self.left_wheel_speed = 0
+                self.right_wheel_speed = 0
+                self.car.motor.setMotorModel(0, 0)
+                # Reset button tracking to prevent false triggers
+                self.gamepad_last_rt_pressed = False
+                self.gamepad_last_lt_pressed = False
+                self.gamepad_last_y_pressed = False
+                self.gamepad_last_a_pressed = False
+                self.gamepad_last_b_pressed = False
+                self.gamepad_last_x_pressed = False
+                self.gamepad_last_rb_pressed = False
+                self.gamepad_last_lb_pressed = False
+                self.gamepad_last_home_pressed = False
+                self.gamepad_last_dpad_y = 0
+                # Ensure free mode for manual control
+                self.car_mode = 1
+                self.gamepad_pinch_active = False
+                self.gamepad_drop_active = False
+
+            # === D-PAD SPEED CONTROL ===
+            # D-pad Up = increase speed, D-pad Down = decrease speed
+            if state.dpad_y != self.gamepad_last_dpad_y:
+                if state.dpad_y == -1:  # D-pad Up
+                    self.gamepad_speed_level = min(4, self.gamepad_speed_level + 1)
+                    print(f"Gamepad: Speed level {self.gamepad_speed_level} ({int(SPEED_MULTIPLIERS[self.gamepad_speed_level]*100)}%)")
+                elif state.dpad_y == 1:  # D-pad Down
+                    self.gamepad_speed_level = max(0, self.gamepad_speed_level - 1)
+                    print(f"Gamepad: Speed level {self.gamepad_speed_level} ({int(SPEED_MULTIPLIERS[self.gamepad_speed_level]*100)}%)")
+                self.gamepad_last_dpad_y = state.dpad_y
+
+            # Calculate effective max speed based on current level
+            motor_max = int(MOTOR_BASE * SPEED_MULTIPLIERS[self.gamepad_speed_level])
+
+            # Only control motors in free mode (mode 1)
+            if self.car_mode == 1:
+                # === TANK DRIVE ===
+                # Left stick controls movement
+                forward = -state.left_stick_y  # Inverted: stick up = forward
+                turn = -state.left_stick_x     # Inverted: stick right = turn right
+
+                # Differential drive mixing
+                left_speed = int((forward + turn) * motor_max)
+                right_speed = int((forward - turn) * motor_max)
+
+                # Clamp to valid range
+                left_speed = max(-4095, min(4095, left_speed))
+                right_speed = max(-4095, min(4095, right_speed))
+
+                # Apply obstacle speed limiting (forward only)
+                left_speed, right_speed = self._apply_lidar_limit(left_speed, right_speed, forward > 0)
+
+                # Only update if changed significantly (reduce motor chatter)
+                # BUT always update if stopping (both speeds are 0) to ensure motors stop
+                should_stop = (left_speed == 0 and right_speed == 0)
+                significant_change = abs(left_speed - self.left_wheel_speed) > 50 or abs(right_speed - self.right_wheel_speed) > 50
+                if should_stop or significant_change:
+                    self.left_wheel_speed = left_speed
+                    self.right_wheel_speed = right_speed
+                    self.car.motor.setMotorModel(left_speed, right_speed)
+
+            # === ARM CONTROL (Right stick - works in free mode) ===
+            if self.car_mode == 1:
+                # Right stick X = Clamp open/close (Servo 0)
+                if abs(state.right_stick_x) > 0.1:
+                    self.gamepad_servo0_angle += state.right_stick_x * SERVO_SPEED
+                    self.gamepad_servo0_angle = max(90, min(150, self.gamepad_servo0_angle))
+                    self.car.servo.setServoAngle(0, int(self.gamepad_servo0_angle))
+
+                # Right stick Y = Arm up/down (Servo 1)
+                if abs(state.right_stick_y) > 0.1:
+                    self.gamepad_servo1_angle -= state.right_stick_y * SERVO_SPEED  # Inverted
+                    self.gamepad_servo1_angle = max(90, min(150, self.gamepad_servo1_angle))
+                    self.car.servo.setServoAngle(1, int(self.gamepad_servo1_angle))
+
+            # === PINCH/DROP ACTIONS (RT/LT - toggles like app checkboxes) ===
+            # RT = Toggle Pinch Object (automated grab sequence)
+            rt_pressed = state.right_trigger > 0.5
+            if rt_pressed and not self.gamepad_last_rt_pressed:
+                if not self.gamepad_pinch_active:
+                    # Start pinch action
+                    self.gamepad_pinch_active = True
+                    self.gamepad_drop_active = False
+                    print("Gamepad: Pinch ON (RT)")
+                    self.car_mode = 5  # Triggers mode_clamp_up
+                else:
+                    # Stop pinch action
+                    self.gamepad_pinch_active = False
+                    print("Gamepad: Pinch OFF (RT)")
+                    self.car_mode = 4  # Stop action
+            self.gamepad_last_rt_pressed = rt_pressed
+
+            # LT = Toggle Drop Object (automated release sequence)
+            lt_pressed = state.left_trigger > 0.5
+            if lt_pressed and not self.gamepad_last_lt_pressed:
+                if not self.gamepad_drop_active:
+                    # Start drop action
+                    self.gamepad_drop_active = True
+                    self.gamepad_pinch_active = False
+                    print("Gamepad: Drop ON (LT)")
+                    self.car_mode = 6  # Triggers mode_clamp_down
+                else:
+                    # Stop drop action
+                    self.gamepad_drop_active = False
+                    print("Gamepad: Drop OFF (LT)")
+                    self.car_mode = 4  # Stop action
+            self.gamepad_last_lt_pressed = lt_pressed
+
+            # === BUTTON ACTIONS ===
+            # A button = Emergency stop (stop motors, return to free mode)
+            if state.button_a and not self.gamepad_last_a_pressed:
+                print("Gamepad: STOP (A)")
+                self.car.motor.setMotorModel(0, 0)
+                self.left_wheel_speed = 0
+                self.right_wheel_speed = 0
+                self.gamepad_pinch_active = False
+                self.gamepad_drop_active = False
+                self.car_mode = 1  # Return to free mode
+            self.gamepad_last_a_pressed = state.button_a
+
+            # B button = LEDs off
+            if state.button_b and not self.gamepad_last_b_pressed:
+                print("Gamepad: LEDs OFF (B)")
+                self.gamepad_led_mode = 0
+                self.queue_led.put("CMD_LED#0#0#0#0#0")
+            self.gamepad_last_b_pressed = state.button_b
+
+            # X button = Home position (reset servos to default)
+            if state.button_x and not self.gamepad_last_x_pressed:
+                print("Gamepad: HOME (X)")
+                self.gamepad_servo0_angle = 90
+                self.gamepad_servo1_angle = 140
+                self.car.servo.setServoAngle(0, 90)
+                self.car.servo.setServoAngle(1, 140)
+            self.gamepad_last_x_pressed = state.button_x
+
+            # Y button = Cycle LED patterns (1-5, use B for off)
+            if state.button_y and not self.gamepad_last_y_pressed:
+                # Cycle through patterns 1-5, skip 0 (use B button for off)
+                if self.gamepad_led_mode < 1 or self.gamepad_led_mode >= 5:
+                    self.gamepad_led_mode = 1
+                else:
+                    self.gamepad_led_mode += 1
+                print(f"Gamepad: LED pattern {self.gamepad_led_mode} (Y)")
+                self.queue_led.put(f"CMD_LED#{self.gamepad_led_mode}#100#100#100#15")
+            self.gamepad_last_y_pressed = state.button_y
+
+            # RB = Quick arm up (servo 1 to 90)
+            if state.button_rb and not self.gamepad_last_rb_pressed:
+                print("Gamepad: Arm UP (RB)")
+                self.gamepad_servo1_angle = 90
+                self.car.servo.setServoAngle(1, 90)
+            self.gamepad_last_rb_pressed = state.button_rb
+
+            # LB = Quick arm down (servo 1 to 150)
+            if state.button_lb and not self.gamepad_last_lb_pressed:
+                print("Gamepad: Arm DOWN (LB)")
+                self.gamepad_servo1_angle = 150
+                self.car.servo.setServoAngle(1, 150)
+            self.gamepad_last_lb_pressed = state.button_lb
+
+            # HOME button (center) = Full reset (stop + home + default speed)
+            if state.button_home and not self.gamepad_last_home_pressed:
+                print("Gamepad: FULL RESET (Home)")
+                # Stop motors
+                self.car.motor.setMotorModel(0, 0)
+                self.left_wheel_speed = 0
+                self.right_wheel_speed = 0
+                # Reset arm to home position
+                self.gamepad_servo0_angle = 90
+                self.gamepad_servo1_angle = 140
+                self.car.servo.setServoAngle(0, 90)
+                self.car.servo.setServoAngle(1, 140)
+                # Reset speed to default (level 2 = 75%)
+                self.gamepad_speed_level = 2
+                # Cancel any active actions
+                self.gamepad_pinch_active = False
+                self.gamepad_drop_active = False
+                self.car_mode = 1  # Return to free mode
+                # Turn off LEDs
+                self.gamepad_led_mode = 0
+                self.queue_led.put("CMD_LED#0#0#0#0#0")
+            self.gamepad_last_home_pressed = state.button_home
+
+            # Time-based loop scheduling for consistent 50Hz update rate
+            elapsed = time.monotonic() - loop_start
+            sleep_time = max(0, LOOP_INTERVAL - elapsed)
+            time.sleep(sleep_time)
+
     def set_threading_video_send(self, state, close_time=0.3):  # Method to start or stop the video sending thread
         if self.video_thread is None:                                                   # Check if the video thread is not initialized
             buf_state = False                                                           # If not, set buffer state to False
@@ -311,6 +668,8 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.set_threading_video_send(False)                    # Stop the video sending thread
         self.set_threading_car_task(False)                      # Stop the car task thread
         self.set_process_led_running(False)                     # Stop the LED control process
+        self.set_threading_gamepad(False)                       # Stop the gamepad thread
+        self.set_threading_lidar(False)                         # Stop the LiDAR thread
         if self.tcp_server:                                     # If the TCP server is initialized
             self.tcp_server.stopTcpServer()                     # Stop the TCP server
             self.tcp_server = None                              # Clear the reference to the TCP server
@@ -321,6 +680,8 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.video_thread.join(0.1)                         # Wait for the video thread to finish, with a timeout
         if self.car_thread and self.car_thread.is_alive():      # If the car thread is running
             self.car_thread.join(0.1)                           # Wait for the car thread to finish, with a timeout
+        if self.gamepad_thread and self.gamepad_thread.is_alive():  # If the gamepad thread is running
+            self.gamepad_thread.join(0.1)                       # Wait for the gamepad thread to finish, with a timeout
         if self.led_process and self.led_process.is_alive():    # If the LED process is running
             self.led_process.terminate()                        # Terminate the LED process
             self.led_process.join(0.1)                          # Wait for the LED process to finish, with a timeout

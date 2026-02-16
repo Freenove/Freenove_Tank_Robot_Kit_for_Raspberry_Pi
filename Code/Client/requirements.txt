@@ -1,0 +1,12 @@
+# Core dependencies (existing)
+PyQt5>=5.15.0
+numpy>=1.21.0
+opencv-python-headless>=4.5.0
+Pillow>=9.0.0
+
+# AI Voice Control
+google-adk>=1.0.0
+google-genai>=0.5.0
+python-dotenv>=1.0.0
+pyaudio>=0.2.13
+# TTS: Uses Gemini 2.5 Flash TTS (native voice) - no pyttsx3 needed
