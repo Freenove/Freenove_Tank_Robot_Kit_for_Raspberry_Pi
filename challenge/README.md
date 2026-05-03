@@ -21,9 +21,10 @@ python3 challenge/main.py
 1. Follow black line continuously using `car.mode_infrared()`.
 2. If a close object is detected, perform avoid maneuver.
 3. If pickup-distance is reached, run clamp pickup sequence.
-4. Return to startup pose (home anchor) using dead-reckoning.
-5. Drop ball at home and continue.
-6. If line is lost, crawl forward slowly.
+4. Build a line graph and attempt shortest-path return to home.
+5. Fall back to dead-reckoning return if no usable graph path.
+6. Drop ball at home and continue.
+7. If line is lost, crawl forward slowly.
 
 ## Runtime Commands
 

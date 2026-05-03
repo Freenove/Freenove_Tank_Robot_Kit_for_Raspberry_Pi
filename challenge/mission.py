@@ -61,6 +61,112 @@ class MapPoint:
     kind: str
 
 
+@dataclass
+class GraphNode:
+    x_m: float
+    y_m: float
+
+
+class LineGraph:
+    def __init__(
+        self,
+        merge_distance_m: float = 0.06,
+        obstacle_block_radius_m: float = 0.12,
+    ) -> None:
+        self.merge_distance_m = merge_distance_m
+        self.obstacle_block_radius_m = obstacle_block_radius_m
+        self.nodes: list[GraphNode] = []
+        self.edges: dict[int, dict[int, float]] = {}
+        self.last_node: int | None = None
+        self.home_node: int | None = None
+        self.obstacle_nodes: set[int] = set()
+
+    def mark_home(self, x_m: float, y_m: float) -> None:
+        self.home_node = self._find_or_add_node(x_m, y_m)
+
+    def add_line_point(self, x_m: float, y_m: float) -> int:
+        node_idx = self._find_or_add_node(x_m, y_m)
+        if self.last_node is not None and self.last_node != node_idx:
+            self._add_edge(self.last_node, node_idx)
+        self.last_node = node_idx
+        return node_idx
+
+    def add_obstacle(self, x_m: float, y_m: float) -> None:
+        node_idx = self._find_or_add_node(x_m, y_m)
+        self.obstacle_nodes.add(node_idx)
+
+    def find_nearest_node(self, x_m: float, y_m: float) -> int | None:
+        best_idx = None
+        best_dist = None
+        for idx, node in enumerate(self.nodes):
+            dist = math.hypot(node.x_m - x_m, node.y_m - y_m)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+        return best_idx
+
+    def shortest_path(self, start: int, goal: int) -> list[int]:
+        if start == goal:
+            return [start]
+        if start in self.obstacle_nodes or goal in self.obstacle_nodes:
+            return []
+
+        unvisited: set[int] = set(range(len(self.nodes)))
+        dist: dict[int, float] = {start: 0.0}
+        prev: dict[int, int] = {}
+
+        while unvisited:
+            current = None
+            current_dist = None
+            for idx in unvisited:
+                if idx not in dist:
+                    continue
+                if current_dist is None or dist[idx] < current_dist:
+                    current = idx
+                    current_dist = dist[idx]
+
+            if current is None:
+                break
+            if current == goal:
+                break
+
+            unvisited.remove(current)
+            for neighbor, cost in self.edges.get(current, {}).items():
+                if neighbor not in unvisited:
+                    continue
+                if neighbor in self.obstacle_nodes:
+                    continue
+                candidate = dist[current] + cost
+                if candidate < dist.get(neighbor, float("inf")):
+                    dist[neighbor] = candidate
+                    prev[neighbor] = current
+
+        if goal not in dist:
+            return []
+
+        path = [goal]
+        while path[-1] != start:
+            path.append(prev[path[-1]])
+        path.reverse()
+        return path
+
+    def _find_or_add_node(self, x_m: float, y_m: float) -> int:
+        for idx, node in enumerate(self.nodes):
+            if math.hypot(node.x_m - x_m, node.y_m - y_m) <= self.merge_distance_m:
+                return idx
+        idx = len(self.nodes)
+        self.nodes.append(GraphNode(x_m, y_m))
+        self.edges[idx] = {}
+        return idx
+
+    def _add_edge(self, a: int, b: int) -> None:
+        node_a = self.nodes[a]
+        node_b = self.nodes[b]
+        cost = math.hypot(node_b.x_m - node_a.x_m, node_b.y_m - node_a.y_m)
+        self.edges[a][b] = cost
+        self.edges[b][a] = cost
+
+
 class ChallengeMission:
     """Simple mission that uses only car.py capabilities."""
 
@@ -84,9 +190,20 @@ class ChallengeMission:
         # Permanent memory for observed entities.
         self.obstacle_memory: list[MapPoint] = []
         self.ball_memory: list[MapPoint] = []
+        self.line_memory: list[MapPoint] = []
+        self.line_graph = LineGraph()
+        self._return_path_nodes: list[int] = []
+        self._return_path_idx = 0
+
+        # Manual (WASD) non-blocking override state.
+        self._manual_override_end_ts: float = 0.0
 
     def step(self) -> None:
         self._integrate_pose()
+
+        # If a manual override is active, skip autonomous behaviors.
+        if time.time() < self._manual_override_end_ts:
+            return
         distance = self._distance_cm()
 
         if self.state == MissionState.AVOID_OBSTACLE:
@@ -119,6 +236,7 @@ class ChallengeMission:
 
     def reset_home_anchor(self) -> None:
         self.home_pose = Pose2D(self.pose.x_m, self.pose.y_m, self.pose.heading_rad)
+        self.line_graph.mark_home(self.home_pose.x_m, self.home_pose.y_m)
 
     def is_carrying_ball(self) -> bool:
         return self._carrying_ball
@@ -139,9 +257,12 @@ class ChallengeMission:
             "carrying": int(self._carrying_ball),
             "balls": len(self.ball_memory),
             "obstacles": len(self.obstacle_memory),
+            "route_nodes": len(self._return_path_nodes),
         }
 
     def manual_drive_pulse(self, key: str, step_s: float) -> bool:
+        # Deprecated blocking pulse; keep for compatibility but prefer
+        # non-blocking start_manual_drive below.
         if key == "w":
             self._drive(900, 900)
         elif key == "s":
@@ -157,6 +278,27 @@ class ChallengeMission:
         self._stop_drive()
         return True
 
+    def start_manual_drive(self, key: str, duration_s: float) -> bool:
+        """Start a non-blocking manual drive override for `duration_s` seconds.
+
+        While active, autonomous behaviors are suspended and pose integration
+        continues using the commanded wheel outputs.
+        """
+        now = time.time()
+        if key == "w":
+            self._drive(900, 900)
+        elif key == "s":
+            self._drive(-900, -900)
+        elif key == "a":
+            self._drive(-850, 850)
+        elif key == "d":
+            self._drive(850, -850)
+        else:
+            return False
+
+        self._manual_override_end_ts = now + max(0.05, duration_s)
+        return True
+
     def manual_pickup_toggle(self) -> None:
         if self._carrying_ball:
             self._drop_ball()
@@ -168,6 +310,17 @@ class ChallengeMission:
         if self._is_line_lost(ir):
             self._drive(self.config.line_crawl_speed, self.config.line_crawl_speed)
             return
+
+        # Record a line observation at the current pose to build a map of lines.
+        # Avoid flooding by only adding when infrared indicates a line.
+        try:
+            if not self._is_line_lost(ir):
+                self.line_memory.append(
+                    MapPoint(self.pose.x_m, self.pose.y_m, "line")
+                )
+                self.line_graph.add_line_point(self.pose.x_m, self.pose.y_m)
+        except Exception:
+            pass
 
         previous_flag = getattr(self.car, "infrared_run_stop", False)
         try:
@@ -186,6 +339,13 @@ class ChallengeMission:
         if self._distance_to_home() <= self.config.home_radius_m:
             self.state = MissionState.DROP_BALL
             return
+
+        if not self._return_path_nodes:
+            self._plan_return_path()
+
+        if self._return_path_nodes:
+            if self._follow_return_path():
+                return
 
         target_heading = math.atan2(
             self.home_pose.y_m - self.pose.y_m,
@@ -210,6 +370,7 @@ class ChallengeMission:
         self._run_clamp(mode=1, timeout_s=self.config.pick_timeout_s)
         self._carrying_ball = True
         self.state = MissionState.RETURN_HOME
+        self._plan_return_path()
 
     def _drop_ball(self) -> None:
         self._stop_drive()
@@ -273,16 +434,65 @@ class ChallengeMission:
 
     def _remember_obstacle(self, distance_cm: float) -> None:
         distance_m = distance_cm / 100.0
-        self.obstacle_memory.append(
-            MapPoint(
-                x_m=self.pose.x_m + distance_m * math.cos(self.pose.heading_rad),
-                y_m=self.pose.y_m + distance_m * math.sin(self.pose.heading_rad),
-                kind="obstacle",
-            )
-        )
+        x_m = self.pose.x_m + distance_m * math.cos(self.pose.heading_rad)
+        y_m = self.pose.y_m + distance_m * math.sin(self.pose.heading_rad)
+        self.obstacle_memory.append(MapPoint(x_m=x_m, y_m=y_m, kind="obstacle"))
+        self.line_graph.add_obstacle(x_m, y_m)
 
     def _remember_ball_here(self) -> None:
         self.ball_memory.append(MapPoint(self.pose.x_m, self.pose.y_m, "ball"))
+
+    def get_map_string(self, size_m: float = 2.0, resolution: int = 41) -> str:
+        """Render a small ASCII map centered at home pose.
+
+        - `size_m` is the width/height in meters
+        - `resolution` is the number of characters per side (odd preferred)
+        """
+        if resolution < 3:
+            resolution = 3
+
+        half = size_m / 2.0
+        step = size_m / float(resolution - 1)
+
+        # Map from world coords to grid indices.
+        def to_idx(x_m: float, y_m: float):
+            rel_x = x_m - self.home_pose.x_m
+            rel_y = y_m - self.home_pose.y_m
+            i = int((rel_y + half) / step)
+            j = int((rel_x + half) / step)
+            return i, j
+
+        # Initialize grid with spaces.
+        grid = [[" " for _ in range(resolution)] for _ in range(resolution)]
+
+        # Draw lines, obstacles, balls.
+        for p in self.line_memory:
+            i, j = to_idx(p.x_m, p.y_m)
+            if 0 <= i < resolution and 0 <= j < resolution:
+                grid[i][j] = "-"
+
+        for p in self.obstacle_memory:
+            i, j = to_idx(p.x_m, p.y_m)
+            if 0 <= i < resolution and 0 <= j < resolution:
+                grid[i][j] = "X"
+
+        for p in self.ball_memory:
+            i, j = to_idx(p.x_m, p.y_m)
+            if 0 <= i < resolution and 0 <= j < resolution:
+                grid[i][j] = "o"
+
+        # Home and current pose
+        hi, hj = to_idx(self.home_pose.x_m, self.home_pose.y_m)
+        ci, cj = to_idx(self.pose.x_m, self.pose.y_m)
+        if 0 <= hi < resolution and 0 <= hj < resolution:
+            grid[hi][hj] = "H"
+        if 0 <= ci < resolution and 0 <= cj < resolution:
+            grid[ci][cj] = "*"
+
+        # Compose string with row 0 at top (y positive up -> show top to bottom)
+        rows = ["".join(row) for row in reversed(grid)]
+        title = f"map(center=home size={size_m}m res={resolution})"
+        return title + "\n" + "\n".join(rows)
 
     def _is_obstacle(self, distance_cm: float) -> bool:
         if self._carrying_ball:
@@ -360,6 +570,52 @@ class ChallengeMission:
         return math.hypot(
             self.home_pose.x_m - self.pose.x_m, self.home_pose.y_m - self.pose.y_m
         )
+
+    def _plan_return_path(self) -> None:
+        self._return_path_nodes = []
+        self._return_path_idx = 0
+
+        if self.line_graph.home_node is None:
+            return
+        start = self.line_graph.find_nearest_node(self.pose.x_m, self.pose.y_m)
+        if start is None:
+            return
+        path = self.line_graph.shortest_path(start, self.line_graph.home_node)
+        if len(path) >= 2:
+            self._return_path_nodes = path
+
+    def _follow_return_path(self) -> bool:
+        if not self._return_path_nodes:
+            return False
+
+        if self._return_path_idx >= len(self._return_path_nodes):
+            self._return_path_nodes = []
+            return False
+
+        node_idx = self._return_path_nodes[self._return_path_idx]
+        node = self.line_graph.nodes[node_idx]
+        target_dist = math.hypot(node.x_m - self.pose.x_m, node.y_m - self.pose.y_m)
+
+        if target_dist <= max(0.04, self.line_graph.merge_distance_m * 0.8):
+            self._return_path_idx += 1
+            if self._return_path_idx >= len(self._return_path_nodes):
+                self._return_path_nodes = []
+                return False
+            node_idx = self._return_path_nodes[self._return_path_idx]
+            node = self.line_graph.nodes[node_idx]
+
+        target_heading = math.atan2(node.y_m - self.pose.y_m, node.x_m - self.pose.x_m)
+        heading_error = self._normalize_angle(target_heading - self.pose.heading_rad)
+
+        if abs(heading_error) > self.config.heading_tolerance_rad:
+            if heading_error > 0:
+                self._drive(-700, 700)
+            else:
+                self._drive(700, -700)
+            return True
+
+        self._drive(850, 850)
+        return True
 
     @staticmethod
     def _normalize_angle(angle: float) -> float:

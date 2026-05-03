@@ -188,7 +188,9 @@ def handle_command(
 ) -> bool:
     step_s = max(0.10, min(0.28, cfg.loop_sleep_s * 4.0))
 
-    if mission.manual_drive_pulse(command, step_s):
+    # Use non-blocking manual override instead of blocking pulse.
+    if command in ("w", "a", "s", "d"):
+        mission.start_manual_drive(command, step_s)
         return True
 
     if command in (" ", "space"):
@@ -307,6 +309,12 @@ def main() -> None:
                         status["obstacles"],
                     )
                 )
+                # Also emit a small ASCII map showing home/current/lines/objects.
+                try:
+                    map_str = mission.get_map_string(size_m=2.0, resolution=41)
+                    console.print_info_line(map_str)
+                except Exception:
+                    pass
                 last_status = now
 
             time.sleep(cfg.loop_sleep_s)
