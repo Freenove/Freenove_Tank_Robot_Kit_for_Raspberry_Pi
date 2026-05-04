@@ -1,5 +1,4 @@
 import argparse
-import importlib.util
 from pathlib import Path
 import select
 import sys
@@ -10,35 +9,41 @@ from typing import Callable, Optional
 
 
 repo_root = Path(__file__).resolve().parents[1]
-server_dir = repo_root / "Code" / "Server"
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
-if str(server_dir) not in sys.path:
-    sys.path.insert(0, str(server_dir))
 
+from challenge.hardware import make_car  # noqa: E402
 from challenge.mission import ChallengeMission, MissionConfig  # noqa: E402
 
 
 MOVEMENT_COMMANDS = {"w", "a", "s", "d", "space", " "}
 
 
-def load_car_class():
-    car_path = server_dir / "car.py"
-    spec = importlib.util.spec_from_file_location("challenge_server_car", car_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"unable to load car module from {car_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, "Car"):
-        raise RuntimeError(f"Car class not found in {car_path}")
-    return module.Car
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run challenge mission (car.py-based) with optional manual WASD controls"
+        description="Run challenge mission. Picks the real Freenove tank on a "
+        "Raspberry Pi and the in-process simulator everywhere else."
     )
+    parser.add_argument(
+        "--mode", choices=["sim", "real", "auto"], default="auto",
+        help="hardware backend: sim (mock+SimWorld), real (Freenove), auto (default)",
+    )
+    parser.add_argument(
+        "--scenario", default="full-course",
+        help="named scenario for sim mode (see challenge/sim/scenarios.py)",
+    )
+    parser.add_argument(
+        "--gui", action="store_true",
+        help="open the pygame visualizer (sim mode only)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="seed sim RNG for reproducible runs",
+    )
+    parser.add_argument("--use-vision", action="store_true",
+                        help="enable red-ball vision pipeline (mission)")
+    parser.add_argument("--params", default=None,
+                        help="load mission tuning params JSON (for example outputs/ga/best_params.json)")
     parser.add_argument("--obstacle-cm", type=float, default=18.0)
     parser.add_argument("--pickup-cm", type=float, default=8.0)
     parser.add_argument("--home-radius-m", type=float, default=0.22)
@@ -46,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loop-sleep", type=float, default=0.05)
     parser.add_argument("--line-crawl-speed", type=int, default=260)
     parser.add_argument("--ir-zero-lost", action="store_true")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="print sensor and arm state without running the mission")
+    parser.add_argument("--calibrate-arm", action="store_true",
+                        help="move the carry arm pose during calibration")
+    parser.add_argument("--calibrate-seconds", type=float, default=8.0)
+    parser.add_argument("--calibrate-interval", type=float, default=0.75)
     return parser.parse_args()
 
 
@@ -57,6 +68,10 @@ def apply_args(cfg: MissionConfig, args: argparse.Namespace) -> None:
     cfg.line_crawl_speed = max(120, args.line_crawl_speed)
     if args.ir_zero_lost:
         cfg.line_code_zero_is_center = False
+    if getattr(args, "params", None):
+        from challenge.tuning import apply_params, load_params
+
+        apply_params(cfg, load_params(args.params))
 
 
 def read_command() -> Optional[str]:
@@ -205,9 +220,12 @@ def handle_command(
     if command == "status":
         status = mission.get_status()
         emit_line(
-            "[challenge] state=%s ir=%s distance_cm=%.1f carrying=%s home_m=%.2f balls=%s obstacles=%s"
+            "[challenge] state=%s reason=%s age=%.2fs ir=%s distance_cm=%.1f carrying=%s "
+            "home_m=%.2f balls=%s obstacles=%s"
             % (
                 status["state"],
+                status["state_reason"],
+                float(status["state_age_s"]),
                 status["ir"],
                 status["distance_cm"],
                 status["carrying"],
@@ -250,21 +268,125 @@ def coalesce_commands(commands: list[str]) -> list[str]:
     return output
 
 
+def _build_sim_world(args: argparse.Namespace):
+    from challenge.sim.scenarios import build_world
+
+    return build_world(args.scenario, seed=args.seed)
+
+
+def _run_calibration(
+    mission: ChallengeMission,
+    cfg: MissionConfig,
+    *,
+    duration_s: float,
+    interval_s: float,
+    set_arm_pose: bool,
+) -> None:
+    servo = getattr(mission.car, "servo", None)
+    if set_arm_pose:
+        if servo is not None:
+            try:
+                servo.setServoAngle("0", cfg.carry_servo0_angle)
+                servo.setServoAngle("1", cfg.carry_servo1_angle)
+            except Exception as exc:
+                print(f"[challenge][calibrate] arm move failed: {exc}")
+        else:
+            print("[challenge][calibrate] arm move skipped: servo unavailable")
+
+    print(
+        "[challenge][calibrate] seconds=%.1f interval=%.2f arm=%s"
+        % (duration_s, interval_s, bool(set_arm_pose))
+    )
+    start = time.monotonic()
+    while time.monotonic() - start < max(0.0, duration_s):
+        status = mission.get_status()
+        servo0 = None
+        servo1 = None
+        if servo is not None:
+            try:
+                servo0 = servo.getServoAngle("0")
+                servo1 = servo.getServoAngle("1")
+            except Exception:
+                servo0 = servo1 = None
+        raised = None
+        world = getattr(mission.car, "_world", None)
+        if world is None:
+            world = getattr(mission.car, "world", None)
+        if world is not None and hasattr(world, "carry_pose_is_raised"):
+            try:
+                raised = bool(world.carry_pose_is_raised())
+            except Exception:
+                raised = None
+        print(
+            "[challenge][calibrate] state=%s reason=%s age=%.2fs ir=%s dist=%.1fcm "
+            "carrying=%s home=%.2fm servo0=%s servo1=%s carry_pose=%s"
+            % (
+                status["state"],
+                status["state_reason"],
+                float(status["state_age_s"]),
+                status["ir"],
+                status["distance_cm"],
+                status["carrying"],
+                status["home_m"],
+                servo0 if servo0 is not None else "-",
+                servo1 if servo1 is not None else "-",
+                "-" if raised is None else ("raised" if raised else "low"),
+            )
+        )
+        time.sleep(max(0.05, interval_s))
+
+
 def main() -> None:
     args = parse_args()
     cfg = MissionConfig()
     apply_args(cfg, args)
+    cfg.use_vision = bool(args.use_vision)
 
-    Car = load_car_class()
-    car = Car()
+    sim_world = None
+    chosen_mode = args.mode
+    if chosen_mode == "auto":
+        chosen_mode = "real" if sys.platform.startswith("linux") else "sim"
+
+    if chosen_mode == "sim":
+        sim_world = _build_sim_world(args)
+
+    try:
+        car = make_car(chosen_mode, world=sim_world)
+    except RuntimeError as exc:
+        print(f"[challenge] {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     mission = ChallengeMission(car=car, config=cfg)
     mission.reset_home_anchor()
+
+    if args.calibrate:
+        try:
+            _run_calibration(
+                mission,
+                cfg,
+                duration_s=args.calibrate_seconds,
+                interval_s=args.calibrate_interval,
+                set_arm_pose=bool(args.calibrate_arm),
+            )
+        finally:
+            car.close()
+        return
+
+    visualizer = None
+    if chosen_mode == "sim" and args.gui:
+        try:
+            from challenge.sim.visualizer import PygameVisualizer
+
+            visualizer = PygameVisualizer(sim_world, mission)
+        except Exception as exc:  # pygame may fail to init in some envs
+            print(f"[challenge] gui disabled: {exc}")
+            visualizer = None
 
     status_interval = max(0.0, args.status_interval)
     last_status = 0.0
     console = RuntimeConsole()
 
-    print("[challenge] main started (car.py runtime)")
+    print(f"[challenge] mode={chosen_mode} scenario={args.scenario if chosen_mode == 'sim' else '-'}"
+          f" vision={cfg.use_vision}")
     print(
         "[challenge] obstacle_cm=%.1f pickup_cm=%.1f home_radius_m=%.2f"
         % (cfg.obstacle_distance_cm, cfg.pickup_distance_cm, cfg.home_radius_m)
@@ -282,6 +404,11 @@ def main() -> None:
                 command = read_command()
                 commands = [command] if command else []
 
+            if visualizer is not None:
+                gui_commands = visualizer.poll_commands()
+                if gui_commands:
+                    commands = list(commands) + list(gui_commands)
+
             commands = coalesce_commands(commands)
 
             manual_handled = False
@@ -294,13 +421,28 @@ def main() -> None:
             if not manual_handled:
                 mission.step()
 
+            if sim_world is not None:
+                # Advance the world after the mission step so motor commands
+                # issued this tick get applied next tick. Using mission loop
+                # cadence keeps the simulator deterministic w.r.t. mission.
+                speed = getattr(visualizer, "speed", 1.0) if visualizer is not None else 1.0
+                sim_world.tick(cfg.loop_sleep_s * max(0.25, min(8.0, float(speed))))
+
+            if visualizer is not None:
+                visualizer.draw(mission)
+                if visualizer.should_quit():
+                    break
+
             now = time.monotonic()
             if status_interval > 0 and now - last_status >= status_interval:
                 status = mission.get_status()
                 console.print_status_line(
-                    "[challenge][status] state=%s ir=%s distance_cm=%.1f carrying=%s home_m=%.2f balls=%s obstacles=%s"
+                    "[challenge][status] state=%s reason=%s age=%.2fs ir=%s distance_cm=%.1f "
+                    "carrying=%s home_m=%.2f balls=%s obstacles=%s"
                     % (
                         status["state"],
+                        status["state_reason"],
+                        float(status["state_age_s"]),
                         status["ir"],
                         status["distance_cm"],
                         status["carrying"],
@@ -322,6 +464,8 @@ def main() -> None:
         console.print_info_line("[challenge] stopping")
     finally:
         console.stop()
+        if visualizer is not None:
+            visualizer.close()
         car.close()
 
 
